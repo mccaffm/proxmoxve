@@ -59,6 +59,8 @@ SCHEMA_HOST_BASE: vol.Schema = vol.Schema(
 SCHEMA_HOST_SSL: vol.Schema = vol.Schema(
     {
         vol.Required(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): bool,
+        vol.Required("use_agent_fsinfo", default=False): bool,
+
     }
 )
 SCHEMA_HOST_AUTH: vol.Schema = vol.Schema(
@@ -99,69 +101,75 @@ class ProxmoxOptionsFlowHandler(config_entries.OptionsFlow):
             ],
         )
 
-    async def async_step_host_auth(self, user_input: dict[str, Any]) -> FlowResult:
-        """Manage the host options step for proxmoxve config flow."""
+    async def async_step_host(self, user_input) -> FlowResult:
+        """Async step of host config flow for proxmoxve."""
         errors = {}
 
-        if user_input is not None:
-            host: str = str(self.config_entry.data[CONF_HOST])
-            port: int = int(str(self.config_entry.data[CONF_PORT]))
-            user: str = str(user_input.get(CONF_USERNAME))
-            token_name: str = str(user_input.get(CONF_TOKEN_NAME))
-            realm: str = str(user_input.get(CONF_REALM))
-            password: str = str(user_input.get(CONF_PASSWORD))
-            verify_ssl = user_input.get(CONF_VERIFY_SSL)
+        if user_input:
+            if (
+                f"{user_input.get(CONF_HOST)}_{user_input.get(CONF_PORT, DEFAULT_PORT)}"
+                in [
+                    f"{entry.data.get(CONF_HOST)}_{entry.data.get(CONF_PORT)}"
+                    for entry in self._async_current_entries()
+                ]
+            ):
+                return self.async_abort(reason="already_configured")
 
-            try:
-                self._proxmox_client = ProxmoxClient(
-                    host=host,
-                    port=port,
-                    user=user,
-                    token_name=token_name,
-                    realm=realm,
-                    password=password,
-                    verify_ssl=verify_ssl,
-                )
+            host = user_input.get(CONF_HOST, "")
+            port = user_input.get(CONF_PORT, DEFAULT_PORT)
+            username = user_input.get(CONF_USERNAME, "")
+            token_name = user_input.get(CONF_TOKEN_NAME, "")
+            password = user_input.get(CONF_PASSWORD, "")
+            realm = user_input.get(CONF_REALM, DEFAULT_REALM)
+            verify_ssl = user_input.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
+            use_agent_fsinfo = user_input.get("use_agent_fsinfo", False)
 
-                await self.hass.async_add_executor_job(
-                    self._proxmox_client.build_client
-                )
+            self._host = host
 
-            except proxmoxer.AuthenticationError:
-                errors[CONF_USERNAME] = "auth_error"
-            except SSLError:
-                errors[CONF_VERIFY_SSL] = "ssl_rejection"
-            except ConnectTimeout:
-                errors[CONF_HOST] = "cant_connect"
-            except Exception:  # pylint: disable=broad-except
-                errors[CONF_BASE] = "general_error"
+            if port > 65535 or port <= 0:
+                errors[CONF_PORT] = "invalid_port"
 
-            else:
-                config_data: dict[str, Any] = (
-                    self.config_entry.data.copy()
-                    if self.config_entry.data is not None
-                    else {}
-                )
-                config_data[CONF_USERNAME] = user_input.get(CONF_USERNAME)
-                config_data[CONF_TOKEN_NAME] = user_input.get(CONF_TOKEN_NAME)
-                config_data[CONF_PASSWORD] = user_input.get(CONF_PASSWORD)
-                config_data[CONF_REALM] = user_input.get(CONF_REALM)
-                config_data[CONF_VERIFY_SSL] = user_input.get(CONF_VERIFY_SSL)
+            if not errors:
+                try:
+                    self._proxmox_client = ProxmoxClient(
+                        host,
+                        port=port,
+                        user=username,
+                        token_name=token_name,
+                        realm=realm,
+                        password=password,
+                        verify_ssl=verify_ssl,
+                    )
 
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry,
-                    data=config_data,
-                )
+                    await self.hass.async_add_executor_job(
+                        self._proxmox_client.build_client
+                    )
 
-                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                except proxmoxer.backends.https.AuthenticationError:
+                    errors[CONF_USERNAME] = "auth_error"
+                except SSLError:
+                    errors[CONF_VERIFY_SSL] = "ssl_rejection"
+                except ConnectTimeout:
+                    errors[CONF_HOST] = "cant_connect"
+                except Exception:  # pylint: disable=broad-except
+                    errors[CONF_BASE] = "general_error"
 
-                return self.async_abort(reason="changes_successful")
+                else:
+                    self._config[CONF_HOST] = host
+                    self._config[CONF_PORT] = port
+                    self._config[CONF_USERNAME] = username
+                    self._config[CONF_TOKEN_NAME] = token_name
+                    self._config[CONF_PASSWORD] = password
+                    self._config[CONF_REALM] = realm
+                    self._config[CONF_VERIFY_SSL] = verify_ssl
+                    self._config["use_agent_fsinfo"] = use_agent_fsinfo
+
+                    return await self.async_step_expose()
 
         return self.async_show_form(
-            step_id="host_auth",
+            step_id="host",
             data_schema=self.add_suggested_values_to_schema(
-                (SCHEMA_HOST_AUTH.extend(SCHEMA_HOST_SSL.schema)),
-                self.config_entry.data or user_input,
+                SCHEMA_HOST_FULL, user_input
             ),
             errors=errors,
         )
