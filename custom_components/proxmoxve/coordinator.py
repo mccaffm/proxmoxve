@@ -92,6 +92,12 @@ class ProxmoxNodeCoordinator(ProxmoxCoordinator):
             ProxmoxType.Node,
             self.resource_id,
         ):
+        if self.config_entry.options.get(\"use_agent_fsinfo\"):
+            fsinfo_data = await get_fsinfo_agent_data(self.proxmox, node, vmid)
+            if fsinfo_data:
+                data.disk_total = fsinfo_data[\"disk_total\"]
+                data.disk_used = fsinfo_data[\"disk_used\"]
+                data.disk_used_perc = fsinfo_data[\"disk_used_perc\"]
             for node_api in nodes_api:
                 if node_api[CONF_NODE] == self.resource_id:
                     node_status = node_api["status"]
@@ -963,3 +969,33 @@ def poll_api(
         f"{config_entry.entry_id}_{resource_id}_forbiden",
     )
     return api_data
+
+async def get_fsinfo_agent_data(proxmox, node: str, vmid: str):
+    """Fetch disk usage via QEMU guest agent."""
+    try:
+        fsinfo = await proxmox.nodes(node).qemu(vmid).agent.get("get-fsinfo")
+        root = next(
+            (
+                fs
+                for fs in fsinfo["result"]
+                if fs.get("filesystem") == "/" or fs.get("mountpoint") == "/"
+            ),
+            None,
+        )
+
+        if not root:
+            return None
+
+        total = root.get("total", 0)
+        used = root.get("used", 0)
+
+        return {
+            "disk_total": total,
+            "disk_used": used,
+            "disk_used_perc": round((used / total) * 100, 1) if total else None,
+        }
+
+    except Exception as e:
+        # Log and fallback
+        _LOGGER.warning("Guest agent disk fetch failed: %s", e)
+        return None
